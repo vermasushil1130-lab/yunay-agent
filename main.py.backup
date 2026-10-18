@@ -1,0 +1,42 @@
+import datetime
+
+APP_NAME = "YUNAY AI Agent"
+VERSION = "0.1.0"
+
+
+def show_menu():
+    print("\n" + "=" * 35)
+    print(f"  {APP_NAME} v{VERSION}")
+    print("=" * 35)
+    print("1. Agent ki jankari")
+    print("2. Current date and time")
+    print("3. Exit")
+
+
+def main():
+    print(f"\nNamaste! Main {APP_NAME} hoon.")
+    print("Abhi mera basic prototype chal raha hai.")
+
+    while True:
+        show_menu()
+        choice = input("\nApna option chuno: ").strip()
+
+        if choice == "1":
+            print(f"\nNaam: {APP_NAME}")
+            print(f"Version: {VERSION}")
+            print("Mode: Basic local prototype")
+
+        elif choice == "2":
+            now = datetime.datetime.now()
+            print(f"\nDate and time: {now}")
+
+        elif choice == "3":
+            print("\nYUNAY AI Agent band ho raha hai.")
+            break
+
+        else:
+            print("\nGalat option. 1, 2 ya 3 chuno.")
+
+
+if __name__ == "__main__":
+    main()
