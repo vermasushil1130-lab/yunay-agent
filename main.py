@@ -3,7 +3,7 @@ import os
 import re
 
 APP_NAME = "YUNAY AI Agent"
-VERSION = "0.4.0"
+VERSION = "1.0.0"
 PROJECT_DIR = "/root/yunay-agent"
 MAX_FIX_ATTEMPTS = 3
 
@@ -23,7 +23,7 @@ def ask_ai(message, silent=False):
             ],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=240,
             cwd=PROJECT_DIR,
         )
 
@@ -58,16 +58,22 @@ def extract_code(text):
 def show_project_info():
     print("\n📁 Project Directory:", PROJECT_DIR)
     try:
-        files = sorted(os.listdir(PROJECT_DIR))
-        for name in files[:35]:
-            if name not in [".git", ".venv", "__pycache__"]:
-                print(" -", name)
+        for root, dirs, files in os.walk(PROJECT_DIR):
+            dirs[:] = [d for d in dirs if d not in [".git", ".venv", "__pycache__"]]
+            level = root.replace(PROJECT_DIR, "").count(os.sep)
+            indent = "  " * level
+            folder_name = os.path.basename(root) or "yunay-agent"
+            print(f"{indent}📂 {folder_name}/")
+            subindent = "  " * (level + 1)
+            for f in sorted(files)[:25]:
+                if not f.startswith("main_backup"):
+                    print(f"{subindent}📄 {f}")
     except OSError as error:
         print("Error:", error)
 
 
 def create_or_edit_file():
-    filename = input("\nFile ka naam likho (e.g. app.py): ").strip()
+    filename = input("\nFile ka naam likho (e.g. calc.py): ").strip()
     if not filename:
         print("❌ File ka naam zaroori hai!")
         return
@@ -89,11 +95,49 @@ def create_or_edit_file():
     if response:
         code = extract_code(response)
         if code:
+            os.makedirs(os.path.dirname(filepath) or PROJECT_DIR, exist_ok=True)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(code + "\n")
             print(f"\n✅ '{filename}' save ho gayi hai!")
-    elif os.path.exists(filepath):
-        print(f"\n✅ '{filename}' project mein ready hai!")
+
+
+def build_multi_file_project():
+    print("\n--- 🏗️ AI Multi-File Project Architect ---")
+    proj_name = input("Naye sub-project folder ka naam (e.g. notes_app): ").strip()
+    if not proj_name:
+        print("❌ Folder ka naam zaroori hai!")
+        return
+
+    idea = input("Project mein kya-kya hona chahiye? Detail batao: ").strip()
+    if not idea:
+        print("❌ Project idea batana zaroori hai!")
+        return
+
+    target_dir = os.path.join(PROJECT_DIR, proj_name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    prompt = (
+        f"Create a complete, modular multi-file Python project inside the folder '{proj_name}' for this idea: {idea}.\n"
+        f"Create at least 2-3 files (for example: '{proj_name}/main.py', '{proj_name}/helper.py', '{proj_name}/README.md').\n"
+        f"Directly write the files to disk in '{proj_name}/', and also output each file clearly in this exact format:\n"
+        f"### FILE: {proj_name}/filename.ext\n```python\n...code...\n```"
+    )
+
+    response = ask_ai(prompt)
+
+    if response:
+        # Fallback parser agar AI response mein files bhejta hai
+        pattern = r"### FILE:\s*([^\n]+)\n```[a-zA-Z]*\n(.*?)```"
+        matches = re.findall(pattern, response, re.DOTALL)
+        for rel_path, content in matches:
+            rel_path = rel_path.strip().strip("`'\"")
+            full_path = os.path.join(PROJECT_DIR, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content.strip() + "\n")
+            print(f"📄 Saved: {rel_path}")
+
+    print(f"\n✅ Multi-file project '{proj_name}' ready hai! Option 2 se tree structure dekhein.")
 
 
 def auto_install_missing_module(error_text):
@@ -109,7 +153,7 @@ def auto_install_missing_module(error_text):
 
 
 def run_and_debug():
-    filename = input("\nKaunsi Python file run karni hai? (e.g. test_app.py): ").strip()
+    filename = input("\nKaunsi Python file run karni hai? (e.g. test_app.py ya notes_app/main.py): ").strip()
     if not filename:
         return
 
@@ -140,12 +184,10 @@ def run_and_debug():
                 print("❌ Error aaya:\n", error_msg)
                 print("-" * 40)
 
-                # Step A: Check agar koi pip module missing hai
                 if auto_install_missing_module(error_msg):
                     print("🔄 Module install hone ke baad dobara run kar rahe hain...")
                     continue
 
-                # Step B: AI Auto-Fix Loop
                 if attempt < MAX_FIX_ATTEMPTS:
                     print(f"\n🔧 AI khud error fix kar raha hai (Auto-Heal Attempt {attempt})...")
                     with open(filepath, "r", encoding="utf-8") as f:
@@ -165,7 +207,7 @@ def run_and_debug():
                             print(f"✅ '{filename}' update ho gayi! Ab dobara test kar rahe hain...")
                             attempt += 1
                             continue
-                
+
                 print("\n⚠️ Max attempts poore ho gaye. Manual check ki zaroorat hai.")
                 return
 
@@ -200,11 +242,11 @@ def git_manager():
 
         print("\n⏳ AI changes dekh kar Commit Message bana raha hai...")
         msg_prompt = (
-            f"Generate a short, clean 1-line git commit message (like 'feat: upgraded agent to v0.4.0 with auto-heal') "
+            f"Generate a short, clean 1-line git commit message (e.g. 'feat: added multi-file project builder') "
             f"for these file changes:\n{diff_text}\nReturn ONLY the commit message text without quotes."
         )
         ai_msg = ask_ai(msg_prompt, silent=True)
-        commit_msg = ai_msg.splitlines()[-1].strip().strip('"`\'') if ai_msg else "feat: updated via YUNAY AI Agent v0.4.0"
+        commit_msg = ai_msg.splitlines()[-1].strip().strip('"`\'') if ai_msg else f"feat: updated via YUNAY AI Agent v{VERSION}"
 
         print(f"📝 AI Commit Message: {commit_msg}")
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=PROJECT_DIR)
@@ -215,22 +257,24 @@ def git_manager():
 
 
 def show_menu():
-    print("\n" + "=" * 42)
-    print(f"  🤖 {APP_NAME} v{VERSION} (Auto-Heal Edition)")
-    print("=" * 42)
+    print("\n" + "=" * 44)
+    print(f"  🤖 {APP_NAME} v{VERSION} (Project Architect)")
+    print("=" * 44)
     print("1. AI se baat karo (Chat)")
-    print("2. Project ki files dekho")
-    print("3. AI se Code File banwao / Edit karo")
-    print("4. File Run & Auto-Heal (3x Auto Bug Fix)")
-    print("5. Smart GitHub Manager (AI Commit & Push)")
-    print("6. Exit")
+    print("2. Project File Tree dekho")
+    print("3. Single File banwao / Edit karo")
+    print("4. 🏗️ AI Multi-File Project Builder (New!)")
+    print("5. File Run & Auto-Heal (3x Auto Bug Fix)")
+    print("6. Smart GitHub Manager (AI Commit & Push)")
+    print("7. 🌐 Launch YUNAY Web Coding Studio (Browser UI)")
+    print("8. Exit")
 
 
 def main():
     print(f"\nNamaste! Main {APP_NAME} v{VERSION} hu.")
     while True:
         show_menu()
-        choice = input("\nApna option chuno (1-6): ").strip()
+        choice = input("\nApna option chuno (1-7): ").strip()
 
         if choice == "1":
             message = input("\nTumhara sawal: ").strip()
@@ -241,14 +285,19 @@ def main():
         elif choice == "3":
             create_or_edit_file()
         elif choice == "4":
-            run_and_debug()
+            build_multi_file_project()
         elif choice == "5":
-            git_manager()
+            run_and_debug()
         elif choice == "6":
+            git_manager()
+        elif choice == "7":
+            import studio
+            studio.start_studio()
+        elif choice == "8":
             print("\nYUNAY AI Agent band ho raha hai. Bye! 👋")
             break
         else:
-            print("\n❌ Galat option! 1 se 6 ke beech chuno.")
+            print("\n❌ Galat option! 1 se 7 ke beech chuno.")
 
 
 if __name__ == "__main__":
