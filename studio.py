@@ -2,8 +2,16 @@ import os
 import re
 import sys
 import json
+import pty
+import shlex
+import fcntl
 import hmac
+import signal
+import select
+import struct
+import termios
 import secrets
+import threading
 import subprocess
 import urllib.request
 import urllib.error
@@ -80,6 +88,9 @@ HTML_PAGE = """<!DOCTYPE html>
   .cmd-card { background: #0f172a; border: 1px solid #334155; padding: 8px; border-radius: 6px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
   .cmd-card code { color: #38bdf8; font-size: 0.78rem; font-family: monospace; }
   .cmd-card span { font-size: 0.75rem; color: #94a3b8; }
+  .keys { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .key { width: auto; margin: 0; padding: 6px 9px; background: #334155; color: #e2e8f0; font-size: 0.72rem; font-weight: 600; }
+  .key.active-key { background: var(--green); color: #052e16; }
 </style>
 </head>
 <body>
@@ -124,9 +135,27 @@ HTML_PAGE = """<!DOCTYPE html>
   <label>💡 Project-Wise Useful Commands (Tap to Run or Copy):</label>
   <div id="smartCmds" style="max-height: 140px; overflow-y: auto; margin-bottom: 8px;"></div>
 
-  <div id="termScreen" class="term-box">root@yunay-studio:~# Terminal ready. Type or click any command below...</div>
+  <div id="termScreen" class="term-box"></div>
+  <div class="keys">
+    <button class="key" onclick="sendKey('\\x1b')">ESC</button>
+    <button class="key" onclick="sendKey('\\t')">TAB</button>
+    <button class="key" id="ctrlKey" onclick="toggleCtrl()">Ctrl</button>
+    <button class="key" onclick="sendKey('\\x03')">^C</button>
+    <button class="key" onclick="sendKey('\\x04')">^D</button>
+    <button class="key" onclick="sendKey('\\x1a')">^Z</button>
+    <button class="key" onclick="sendKey('\\x0c')">^L</button>
+    <button class="key" onclick="sendKey('\\x1b[A')">↑</button>
+    <button class="key" onclick="sendKey('\\x1b[B')">↓</button>
+    <button class="key" onclick="sendKey('\\x1b[D')">←</button>
+    <button class="key" onclick="sendKey('\\x1b[C')">→</button>
+    <button class="key" onclick="sendKey('/')">/</button>
+    <button class="key" onclick="sendKey('-')">-</button>
+    <button class="key" onclick="sendKey('~')">~</button>
+    <button class="key" onclick="sendKey('|')">|</button>
+    <button class="key" onclick="termRestart()">⟳ Restart</button>
+  </div>
   <div class="row">
-    <input type="text" id="termInput" placeholder="Type Linux / Python / Git command..." style="margin:0;" onkeydown="if(event.key==='Enter')sendTermCmd()">
+    <input type="text" id="termInput" placeholder="Type command, phir Enter..." style="margin:0;" onkeydown="termKeydown(event)">
     <button class="green" style="width:auto; margin:0; padding:0 16px;" onclick="sendTermCmd()">Run ↵</button>
   </div>
 </div>
@@ -174,12 +203,16 @@ HTML_PAGE = """<!DOCTYPE html>
 <script>
 const AUTH_TOKEN = "__AUTH_TOKEN__";
 
+let termPoll = null;
+let ctrlActive = false;
+
 function switchTab(t, el) {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('tab-' + t).classList.add('active');
-  if (t === 'term') loadSmartCommands();
+  if (t === 'term') { loadSmartCommands(); termStart(); }
+  else if (termPoll) { clearInterval(termPoll); termPoll = null; }
 }
 
 async function api(action, data = {}) {
@@ -293,23 +326,62 @@ async function autoFixFile() {
   if (res.fixed_code) document.getElementById('codeArea').value = res.fixed_code;
 }
 
+async function termStart() {
+  await api('term_start');
+  if (termPoll) clearInterval(termPoll);
+  termPoll = setInterval(termRead, 500);
+  termRead();
+}
+
+async function termRead() {
+  const res = await api('term_read');
+  if (res.output) {
+    const screen = document.getElementById('termScreen');
+    screen.textContent += res.output;
+    screen.scrollTop = screen.scrollHeight;
+  }
+}
+
+async function sendKey(seq) {
+  await api('term_input', { data: seq });
+  termRead();
+}
+
+function toggleCtrl() {
+  ctrlActive = !ctrlActive;
+  const el = document.getElementById('ctrlKey');
+  if (el) el.classList.toggle('active-key', ctrlActive);
+}
+
+async function termRestart() {
+  await api('term_restart');
+  document.getElementById('termScreen').textContent = '';
+  termRead();
+}
+
 async function sendTermCmd() {
   const inp = document.getElementById('termInput');
-  const cmd = inp.value.trim();
-  if (!cmd) return;
+  const cmd = inp.value;
+  if (!cmd) { await sendKey('\\r'); return; }
   inp.value = '';
-  runQuickCmd(cmd);
+  await sendKey(cmd + '\\r');
+}
+
+function termKeydown(e) {
+  if (e.key === 'Enter') { e.preventDefault(); sendTermCmd(); return; }
+  if (e.key === 'Tab') { e.preventDefault(); sendKey('\\t'); return; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); sendKey('\\x1b[A'); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); sendKey('\\x1b[B'); return; }
+  if (ctrlActive && e.key.length === 1) {
+    e.preventDefault();
+    const code = e.key.toUpperCase().charCodeAt(0) - 64;
+    if (code >= 0 && code < 32) sendKey(String.fromCharCode(code));
+    toggleCtrl();
+  }
 }
 
 async function runQuickCmd(cmd) {
-  const screen = document.getElementById('termScreen');
-  const marker = '⏳ Running...';
-  screen.textContent += `\n\n$ ${cmd}\n` + marker;
-  screen.scrollTop = screen.scrollHeight;
-  const res = await api('terminal', { cmd });
-  const text = screen.textContent;
-  screen.textContent = text.slice(0, text.length - marker.length) + (res.output || '');
-  screen.scrollTop = screen.scrollHeight;
+  await sendKey(cmd + '\\r');
 }
 
 async function askAI() {
@@ -545,6 +617,128 @@ def create_github_repo(name, private, description):
         return json.loads(resp.read().decode("utf-8"))
 
 
+ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+    r"|\r"
+)
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text)
+
+
+class TermSession:
+    def __init__(self, shell, cwd):
+        self.lock = threading.Lock()
+        self.buf = ""
+        self.fd = None
+        self.pid = None
+        self.alive = False
+        self.start(shell, cwd)
+
+    def start(self, shell, cwd):
+        self.close()
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(cwd)
+            except OSError:
+                pass
+            env = dict(os.environ, TERM="xterm-256color", PS1="\\w $ ")
+            try:
+                os.execvpe(shell, [shell, "-i"], env)
+            except OSError:
+                os._exit(1)
+        self.pid = pid
+        self.fd = fd
+        self.alive = True
+        os.set_blocking(fd, False)
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        while self.alive:
+            try:
+                ready, _, _ = select.select([self.fd], [], [], 0.5)
+            except (OSError, ValueError):
+                break
+            if self.fd in ready:
+                try:
+                    data = os.read(self.fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with self.lock:
+                    self.buf += data.decode("utf-8", "replace")
+        self.alive = False
+
+    def write(self, data):
+        if self.fd is None:
+            return
+        try:
+            os.write(self.fd, data.encode("utf-8", "replace"))
+        except OSError:
+            pass
+
+    def drain(self):
+        with self.lock:
+            out, self.buf = self.buf, ""
+        return strip_ansi(out)
+
+    def resize(self, cols, rows):
+        try:
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        except OSError:
+            pass
+
+    def close(self):
+        self.alive = False
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+            except OSError:
+                pass
+            self.pid = None
+
+
+TERM_SESSION = None
+TERM_LOCK = threading.Lock()
+
+
+def _shell_path():
+    shell = os.environ.get("SHELL", "/usr/bin/bash")
+    if not os.path.exists(shell):
+        shell = "/usr/bin/bash" if os.path.exists("/usr/bin/bash") else "/bin/sh"
+    return shell
+
+
+def get_term_session():
+    global TERM_SESSION
+    with TERM_LOCK:
+        if TERM_SESSION is None or not TERM_SESSION.alive:
+            TERM_SESSION = TermSession(_shell_path(), CURRENT_PROJECT)
+        return TERM_SESSION
+
+
+def restart_term_session():
+    global TERM_SESSION
+    with TERM_LOCK:
+        if TERM_SESSION is None:
+            TERM_SESSION = TermSession(_shell_path(), CURRENT_PROJECT)
+        else:
+            TERM_SESSION.start(_shell_path(), CURRENT_PROJECT)
+        return TERM_SESSION
+
+
 class StudioHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[studio] " + (fmt % args) + "\n")
@@ -667,6 +861,8 @@ class StudioHandler(BaseHTTPRequestHandler):
             elif os.path.isdir(new_p):
                 CURRENT_PROJECT = new_p
                 response["message"] = f"✅ Switched to: {CURRENT_PROJECT}"
+                if TERM_SESSION is not None and TERM_SESSION.alive:
+                    TERM_SESSION.write(f"cd {shlex.quote(new_p)}\r")
             else:
                 response["message"] = "❌ Directory not found!"
 
@@ -730,27 +926,28 @@ class StudioHandler(BaseHTTPRequestHandler):
             if fixed:
                 response["fixed_code"] = fixed
 
+        elif action == "term_start":
+            get_term_session()
+            response["output"] = ""
+
+        elif action == "term_read":
+            response["output"] = get_term_session().drain()
+
+        elif action == "term_input":
+            get_term_session().write(body.get("data", ""))
+            response["output"] = ""
+
+        elif action == "term_resize":
+            get_term_session().resize(int(body.get("cols", 80)), int(body.get("rows", 24)))
+            response["output"] = ""
+
+        elif action == "term_restart":
+            restart_term_session()
+            response["output"] = "🔄 Naya shell shuru."
+
         elif action == "terminal":
-            cmd = body.get("cmd", "").strip()
-            if cmd.startswith("cd "):
-                target = os.path.expanduser(cmd[3:].strip())
-                new_dir = os.path.abspath(os.path.join(CURRENT_PROJECT, target))
-                if os.path.isdir(new_dir):
-                    CURRENT_PROJECT = new_dir
-                    response["output"] = f"Changed directory to {CURRENT_PROJECT}"
-                else:
-                    response["output"] = f"bash: cd: {target}: No such directory"
-            elif cmd:
-                try:
-                    res = subprocess.run(
-                        cmd, shell=True, capture_output=True, text=True,
-                        timeout=CMD_TIMEOUT, cwd=CURRENT_PROJECT,
-                    )
-                    response["output"] = ((res.stdout or "") + (res.stderr or "")).strip() or "(Done)"
-                except subprocess.TimeoutExpired:
-                    response["output"] = f"⚠️ Timeout ({CMD_TIMEOUT}s)"
-                except Exception as e:
-                    response["output"] = f"Error: {str(e)}"
+            get_term_session().write(body.get("cmd", "") + "\r")
+            response["output"] = ""
 
         elif action == "ask_ai":
             response["output"] = ask_ai(body.get("prompt", ""), body.get("filename", "").strip())
