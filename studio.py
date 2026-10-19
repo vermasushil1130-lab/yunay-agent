@@ -43,6 +43,7 @@ def _load_token():
 
 
 STUDIO_TOKEN = _load_token()
+COOKIE = f"yunay_token={STUDIO_TOKEN}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"
 
 AI_TIMEOUT = int(os.environ.get("YUNAY_AI_TIMEOUT", "240"))
 CMD_TIMEOUT = int(os.environ.get("YUNAY_CMD_TIMEOUT", "60"))
@@ -529,7 +530,7 @@ class StudioHandler(BaseHTTPRequestHandler):
                 data = page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
-                self.send_header("Set-Cookie", f"yunay_token={STUDIO_TOKEN}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Set-Cookie", COOKIE)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -557,7 +558,7 @@ class StudioHandler(BaseHTTPRequestHandler):
             supplied = (parse_qs(raw).get("token") or [""])[0]
             if hmac.compare_digest(supplied, STUDIO_TOKEN):
                 self.send_response(302)
-                self.send_header("Set-Cookie", f"yunay_token={STUDIO_TOKEN}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Set-Cookie", COOKIE)
                 self.send_header("Location", "/")
                 self.end_headers()
             else:
