@@ -6,6 +6,7 @@ import hmac
 import secrets
 import subprocess
 import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 HOST = os.environ.get("YUNAY_HOST", "127.0.0.1")
@@ -153,6 +154,17 @@ HTML_PAGE = """<!DOCTYPE html>
     <input type="text" id="cloneUrl" placeholder="https://github.com/..." style="margin:0;">
     <button style="width:auto; margin:0; white-space:nowrap;" onclick="cloneRepo()">⬇️ Clone</button>
   </div>
+  <hr style="border:0; border-top:1px solid #334155; margin: 12px 0;">
+  <label>➕ Naya Repo (Local + GitHub):</label>
+  <div class="row">
+    <input type="text" id="newRepoName" placeholder="repo-name (e.g. my-app)" style="margin:0;">
+    <select id="newRepoVisibility" style="width:auto; margin:0;">
+      <option value="private">🔒 Private</option>
+      <option value="public">🌐 Public</option>
+    </select>
+  </div>
+  <input type="text" id="newRepoDesc" placeholder="Description (optional)">
+  <button class="green" onclick="createRepo()">➕ Create Local + GitHub Repo</button>
   <hr style="border:0; border-top:1px solid #334155; margin: 12px 0;">
   <button onclick="gitAction('status')">📊 Git Status</button>
   <button class="green" onclick="gitAction('push')">🚀 AI Smart Commit & Push</button>
@@ -335,6 +347,17 @@ async function cloneRepo() {
   loadProjects();
 }
 
+async function createRepo() {
+  const name = document.getElementById('newRepoName').value.trim();
+  if (!name) { document.getElementById('gitOutput').textContent = '⚠️ Repo name daalein!'; return; }
+  const priv = document.getElementById('newRepoVisibility').value === 'private';
+  const description = document.getElementById('newRepoDesc').value.trim();
+  document.getElementById('gitOutput').textContent = '⏳ Repo ban raha hai...';
+  const res = await api('create_repo', { name, private: priv, description });
+  document.getElementById('gitOutput').textContent = res.output;
+  loadProjects();
+}
+
 async function gitAction(sub) {
   const res = await api('git', { sub });
   document.getElementById('gitOutput').textContent = res.output;
@@ -492,6 +515,34 @@ def list_github_repos():
             break
         page += 1
     return repos
+
+
+def github_username():
+    if not GITHUB_TOKEN:
+        return GITHUB_USER
+    req = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={"User-Agent": "YUNAY-Studio", "Accept": "application/vnd.github+json",
+                 "Authorization": f"Bearer {GITHUB_TOKEN}"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8")).get("login", GITHUB_USER)
+
+
+def create_github_repo(name, private, description):
+    payload = json.dumps({
+        "name": name,
+        "private": bool(private),
+        "description": description or "",
+        "auto_init": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.github.com/user/repos", data=payload, method="POST",
+        headers={"User-Agent": "YUNAY-Studio", "Accept": "application/vnd.github+json",
+                 "Authorization": f"Bearer {GITHUB_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 class StudioHandler(BaseHTTPRequestHandler):
@@ -735,6 +786,51 @@ class StudioHandler(BaseHTTPRequestHandler):
                 CURRENT_PROJECT = target_path
                 response["output"] = "ℹ️ Already exists, switched to it."
 
+        elif action == "create_repo":
+            name = body.get("name", "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", name or ""):
+                raise ValueError("Repo name invalid (sirf letters, numbers, . _ - allowed)")
+            target = os.path.join(BASE_WORKSPACE, name)
+            if os.path.exists(target):
+                raise ValueError(f"'{name}' pehle se maujood hai")
+            os.makedirs(target)
+            init = subprocess.run(["git", "init", "-b", "main"], cwd=target, capture_output=True, text=True)
+            if init.returncode != 0:
+                subprocess.run(["git", "init"], cwd=target, capture_output=True, text=True)
+                subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=target, capture_output=True, text=True)
+            with open(os.path.join(target, "README.md"), "w", encoding="utf-8") as f:
+                f.write(f"# {name}\n")
+            with open(os.path.join(target, ".gitignore"), "w", encoding="utf-8") as f:
+                f.write(".venv/\n__pycache__/\n*.pyc\n.env\n")
+            subprocess.run(["git", "add", "."], cwd=target, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-c", "user.name=YUNAY Studio", "-c", "user.email=studio@yunay.local",
+                 "commit", "-m", "chore: initial commit"],
+                cwd=target, capture_output=True, text=True,
+            )
+            log = [f"✅ Local repo ban gaya: {target}"]
+            if GITHUB_TOKEN:
+                try:
+                    user = github_username()
+                    repo = create_github_repo(name, body.get("private", True), body.get("description", ""))
+                    clone_url = repo.get("clone_url") or f"https://github.com/{user}/{name}.git"
+                    token_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{user}/{name}.git"
+                    subprocess.run(["git", "remote", "add", "origin", clone_url], cwd=target, capture_output=True, text=True)
+                    push = subprocess.run(["git", "push", "-u", token_url, "main"], cwd=target, capture_output=True, text=True)
+                    if push.returncode == 0:
+                        log.append(f"✅ GitHub repo bhi ban gaya aur push ho gaya:\n{clone_url}")
+                    else:
+                        log.append(f"⚠️ GitHub repo bana par push fail:\n{push.stderr or push.stdout}")
+                except urllib.error.HTTPError as e:
+                    detail = e.read().decode("utf-8", "ignore")
+                    log.append(f"⚠️ GitHub repo create fail ({e.code}): {detail}")
+                except Exception as e:
+                    log.append(f"⚠️ GitHub part error: {e}")
+            else:
+                log.append("ℹ️ GITHUB_TOKEN set nahi hai — sirf local repo bana. GitHub par bhejne ke liye token set karein.")
+            CURRENT_PROJECT = target
+            response["output"] = "\n".join(log)
+
         elif action == "git":
             sub = body.get("sub")
             if sub == "status":
@@ -754,6 +850,24 @@ class StudioHandler(BaseHTTPRequestHandler):
                         capture_output=True, text=True, cwd=CURRENT_PROJECT,
                     )
                     res = subprocess.run(["git", "push"], capture_output=True, text=True, cwd=CURRENT_PROJECT)
+                    if res.returncode != 0 and GITHUB_TOKEN:
+                        origin = subprocess.run(
+                            ["git", "remote", "get-url", "origin"],
+                            capture_output=True, text=True, cwd=CURRENT_PROJECT,
+                        ).stdout.strip()
+                        branch = subprocess.run(
+                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, cwd=CURRENT_PROJECT,
+                        ).stdout.strip() or "main"
+                        if origin.startswith("https://github.com/"):
+                            tok_url = origin.replace(
+                                "https://github.com/",
+                                f"https://x-access-token:{GITHUB_TOKEN}@github.com/",
+                            )
+                            res = subprocess.run(
+                                ["git", "push", tok_url, f"HEAD:refs/heads/{branch}"],
+                                capture_output=True, text=True, cwd=CURRENT_PROJECT,
+                            )
                     head = "✅ Pushed to GitHub!\n" if res.returncode == 0 else "❌ Push failed:\n"
                     response["output"] = head + (res.stdout or res.stderr)
             else:
