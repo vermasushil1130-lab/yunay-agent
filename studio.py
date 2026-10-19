@@ -14,8 +14,36 @@ BASE_WORKSPACE = os.environ.get("YUNAY_WORKSPACE", "/root")
 CURRENT_PROJECT = os.environ.get("YUNAY_PROJECT", "/root/yunay-agent")
 GITHUB_USER = os.environ.get("YUNAY_GITHUB_USER", "vermasushil1130-lab")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-STUDIO_TOKEN = os.environ.get("YUNAY_TOKEN") or secrets.token_urlsafe(24)
 PYTHON_BIN = sys.executable or "python3"
+TOKEN_FILE = os.environ.get(
+    "YUNAY_TOKEN_FILE", os.path.join(os.path.expanduser("~"), ".yunay_studio_token")
+)
+
+
+def _load_token():
+    env_token = os.environ.get("YUNAY_TOKEN")
+    if env_token:
+        return env_token
+    try:
+        if os.path.isfile(TOKEN_FILE):
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                saved = f.read().strip()
+            if saved:
+                return saved
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(token)
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+STUDIO_TOKEN = _load_token()
+
 AI_TIMEOUT = int(os.environ.get("YUNAY_AI_TIMEOUT", "240"))
 CMD_TIMEOUT = int(os.environ.get("YUNAY_CMD_TIMEOUT", "60"))
 
@@ -317,6 +345,38 @@ loadProjects();
 </html>
 """
 
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YUNAY Studio — Login</title>
+<style>
+  body { background:#0f172a; color:#f8fafc; font-family:system-ui,sans-serif; display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; padding:16px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:22px; width:100%; max-width:420px; }
+  h1 { color:#38bdf8; font-size:1.15rem; margin:0 0 6px; }
+  p { color:#94a3b8; font-size:0.85rem; margin:0 0 14px; line-height:1.4; }
+  input { width:100%; background:#0f172a; color:#f8fafc; border:1px solid #334155; padding:12px; border-radius:8px; font-family:monospace; font-size:0.9rem; box-sizing:border-box; }
+  button { background:#38bdf8; color:#0f172a; border:none; padding:12px; border-radius:8px; font-weight:700; width:100%; margin-top:10px; cursor:pointer; font-size:0.9rem; }
+  .err { color:#f87171; font-size:0.82rem; margin-top:10px; }
+  code { background:#0f172a; padding:1px 5px; border-radius:4px; color:#38bdf8; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⚡ YUNAY AI Studio</h1>
+  <p>Access token daalein. Token terminal me printed link me hota hai:
+  <code>?token=...</code> wala hissa.</p>
+  __ERROR__
+  <form method="POST" action="/login">
+    <input type="password" name="token" placeholder="Studio token" autofocus autocomplete="off">
+    <button type="submit">🔓 Login</button>
+  </form>
+</div>
+</body>
+</html>
+"""
+
 
 def extract_code_block(text):
     blocks = re.findall(r"```[ \t]*([a-zA-Z0-9_+-]*)[ \t]*\r?\n(.*?)```", text, re.DOTALL)
@@ -477,8 +537,7 @@ class StudioHandler(BaseHTTPRequestHandler):
             else:
                 self._send(
                     401,
-                    "<h1>401 Unauthorized</h1><p>Studio URL me <code>?token=...</code> chahiye. "
-                    "Terminal me printed link use karein.</p>",
+                    LOGIN_PAGE.replace("__ERROR__", ""),
                     "text/html; charset=utf-8",
                 )
         else:
@@ -486,8 +545,30 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global CURRENT_PROJECT
-        from urllib.parse import urlparse
-        if urlparse(self.path).path != "/api":
+        from urllib.parse import urlparse, parse_qs
+        path = urlparse(self.path).path
+
+        if path == "/login":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                raw = ""
+            supplied = (parse_qs(raw).get("token") or [""])[0]
+            if hmac.compare_digest(supplied, STUDIO_TOKEN):
+                self.send_response(302)
+                self.send_header("Set-Cookie", f"yunay_token={STUDIO_TOKEN}; Path=/; HttpOnly; SameSite=Strict")
+                self.send_header("Location", "/")
+                self.end_headers()
+            else:
+                self._send(
+                    401,
+                    LOGIN_PAGE.replace("__ERROR__", '<p class="err">❌ Galat token, dobara try karein.</p>'),
+                    "text/html; charset=utf-8",
+                )
+            return
+
+        if path != "/api":
             self._send(404, {"output": "not found"})
             return
         if not self._authed():
@@ -688,6 +769,8 @@ def start_studio():
     print("\n🌐 YUNAY AI Studio v1.3.0 chalu ho gaya hai!")
     print(f"👉 Browser mein kholein: {url}")
     print(f"   Workspace: {BASE_WORKSPACE}  |  Project: {CURRENT_PROJECT}")
+    print(f"🔑 Token: {STUDIO_TOKEN}")
+    print(f"   (Token file: {TOKEN_FILE} — restart par bhi same rehta hai)")
     if HOST == "0.0.0.0":
         print("⚠️  Server 0.0.0.0 par khula hai — koi bhi network se access kar sakta hai (token ke saath).")
     print("\n(Band karne ke liye Ctrl + C)\n")
